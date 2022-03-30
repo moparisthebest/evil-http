@@ -37,11 +37,17 @@ impl EvilServer {
         }
     }
 
-    fn write_get(&self, stream: &mut TcpStream) -> std::io::Result<()> {
+    fn write_get(&self, stream: &mut TcpStream, count: &mut usize) -> std::io::Result<()> {
         stream.write_all(HTTP_GET_SUCCESS_HEADERS)?;
         send_chunk(stream, IMAGE)?;
-        for _ in 0..self.mbs_to_send {
+        let mbs_to_send = if self.mbs_to_send > 0 {
+            self.mbs_to_send
+        } else {
+            usize::MAX
+        };
+        for _ in 0..mbs_to_send {
             send_chunk(stream, BODY_CHUNK)?;
+            *count += 1;
         }
         send_chunk(stream, END)?;
         stream.flush()?;
@@ -66,12 +72,16 @@ impl EvilServer {
             stream.flush()?;
         } else {
             let user_agent = user_agent.as_deref().unwrap_or("unknown");
-            match self.write_get(&mut stream) {
+            let mut count = 0;
+            match self.write_get(&mut stream, &mut count) {
                 Ok(_) => {
                     println!("user-agent is vulnerable: {}", user_agent);
                 }
                 Err(e) => {
-                    println!("user-agent is NOT vulnerable: {}, err: {}", user_agent, e);
+                    println!(
+                        "user-agent is NOT vulnerable: {}, aborted after {}mb, err: {}",
+                        user_agent, count, e
+                    );
                 }
             }
         }
